@@ -1,0 +1,150 @@
+name: Publish release docs
+
+# Reusable workflow: on a plugin release tag, publish the tagged version's
+# readme.txt changelog section and a regenerated hooks/filters reference to
+# the artifex site (BetterDocs) via the user-docs pipeline.
+#
+# Call from a plugin repo's .github/workflows/release-docs.yml:
+#
+#   on:
+#     push:
+#       tags: ['[0-9]*', 'v[0-9]*']
+#   jobs:
+#     docs:
+#       uses: artifexrouting/.github/.github/workflows/plugin-release-docs.yml@main
+#       with:
+#         product: steuard            # doc_category slug (coupon-creator family shares one)
+#         # component: Coupon Creator Pro   # display name when product is shared
+#       secrets: inherit
+#
+# Org secrets required: DOCS_SITE_URL, DOCS_API_USER, DOCS_APP_PASSWORD,
+# and DOCS_REPO_TOKEN (fine-grained PAT with read access to
+# artifexrouting/user-docs, which is private).
+
+on:
+  workflow_call:
+    inputs:
+      product:
+        description: 'Product slug on the docs site (doc_category term)'
+        required: true
+        type: string
+      component:
+        description: 'Component display name when several repos share a product'
+        required: false
+        type: string
+        default: ''
+      readme_path:
+        description: 'Path to the readme with the == Changelog == section'
+        required: false
+        type: string
+        default: 'readme.txt'
+      version:
+        description: 'Version override (defaults to the tag name, v-prefix stripped)'
+        required: false
+        type: string
+        default: ''
+      skip_hooks:
+        description: 'Skip the hooks-reference step'
+        required: false
+        type: boolean
+        default: false
+      hooks_ignore_files:
+        description: 'Path substrings excluded from hook scanning'
+        required: false
+        type: string
+        default: '/vendor/,/node_modules/,/tests/,/dist/,/build/,/bin/,/plugin-engine/'
+      hooks_ignore_hooks:
+        description: 'Hook names excluded from the reference'
+        required: false
+        type: string
+        default: ''
+    secrets:
+      DOCS_SITE_URL:
+        required: true
+      DOCS_API_USER:
+        required: true
+      DOCS_APP_PASSWORD:
+        required: true
+      DOCS_REPO_TOKEN:
+        required: true
+
+jobs:
+  release-docs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout plugin
+        uses: actions/checkout@v4
+        with:
+          path: plugin
+
+      - name: Checkout user-docs pipeline
+        uses: actions/checkout@v4
+        with:
+          repository: artifexrouting/user-docs
+          token: ${{ secrets.DOCS_REPO_TOKEN }}
+          path: user-docs
+
+      - name: Derive version
+        id: version
+        run: |
+          v="${{ inputs.version }}"
+          if [ -z "$v" ]; then
+            v="${GITHUB_REF_NAME#v}"
+          fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "Version: $v"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install pipeline dependencies
+        working-directory: user-docs
+        run: npm ci
+
+      - name: Publish release notes
+        working-directory: user-docs
+        env:
+          DOCS_SITE_URL: ${{ secrets.DOCS_SITE_URL }}
+          DOCS_API_USER: ${{ secrets.DOCS_API_USER }}
+          DOCS_APP_PASSWORD: ${{ secrets.DOCS_APP_PASSWORD }}
+        run: |
+          node bin/release-notes.mjs \
+            --product='${{ inputs.product }}' \
+            --version='${{ steps.version.outputs.version }}' \
+            --readme="$GITHUB_WORKSPACE/plugin/${{ inputs.readme_path }}" \
+            ${{ inputs.component && format('--component={0}', inputs.component) || '' }} \
+            --target=production
+
+      - uses: shivammathur/setup-php@v2
+        if: ${{ !inputs.skip_hooks }}
+        with:
+          php-version: '8.3'
+          tools: composer
+
+      - name: Generate hooks JSON
+        if: ${{ !inputs.skip_hooks }}
+        run: |
+          mkdir hooks-gen hooks-json
+          cd hooks-gen
+          composer require erusev/parsedown:1.8.0-beta-7 wp-hooks/generator:^1.0 --no-interaction --quiet
+          vendor/bin/wp-hooks-generator \
+            --input="$GITHUB_WORKSPACE/plugin" \
+            --output="$GITHUB_WORKSPACE/hooks-json" \
+            --ignore-files='${{ inputs.hooks_ignore_files }}' \
+            ${{ inputs.hooks_ignore_hooks && format('--ignore-hooks={0}', inputs.hooks_ignore_hooks) || '' }}
+
+      - name: Publish hooks reference
+        if: ${{ !inputs.skip_hooks }}
+        working-directory: user-docs
+        env:
+          DOCS_SITE_URL: ${{ secrets.DOCS_SITE_URL }}
+          DOCS_API_USER: ${{ secrets.DOCS_API_USER }}
+          DOCS_APP_PASSWORD: ${{ secrets.DOCS_APP_PASSWORD }}
+        run: |
+          node bin/hooks-to-doc.mjs \
+            --product='${{ inputs.product }}' \
+            --input="$GITHUB_WORKSPACE/hooks-json" \
+            ${{ inputs.component && format('--component={0}', inputs.component) || '' }} \
+            --source-url='${{ github.server_url }}/${{ github.repository }}/blob/${{ github.ref_name }}' \
+            --target=production
