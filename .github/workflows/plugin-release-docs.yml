@@ -113,18 +113,22 @@ jobs:
         working-directory: user-docs
         run: npm ci
 
+      # COMPONENT is passed through the environment and quoted in the shell:
+      # an inline ${{ }} expansion of "Coupon Creator Pro" was word-split into
+      # --component=Coupon Creator Pro, publishing under a "coupon" component.
       - name: Publish release notes
         working-directory: user-docs
         env:
           DOCS_SITE_URL: ${{ secrets.DOCS_SITE_URL }}
           DOCS_API_USER: ${{ secrets.DOCS_API_USER }}
           DOCS_APP_PASSWORD: ${{ secrets.DOCS_APP_PASSWORD }}
+          COMPONENT: ${{ inputs.component }}
         run: |
           node bin/release-notes.mjs \
             --product='${{ inputs.product }}' \
             --version='${{ steps.version.outputs.version }}' \
             --readme="$GITHUB_WORKSPACE/plugin/${{ inputs.readme_path }}" \
-            ${{ inputs.component && format('--component={0}', inputs.component) || '' }} \
+            ${COMPONENT:+--component="$COMPONENT"} \
             --target=production
 
       - uses: shivammathur/setup-php@v2
@@ -152,10 +156,11 @@ jobs:
           DOCS_SITE_URL: ${{ secrets.DOCS_SITE_URL }}
           DOCS_API_USER: ${{ secrets.DOCS_API_USER }}
           DOCS_APP_PASSWORD: ${{ secrets.DOCS_APP_PASSWORD }}
+          COMPONENT: ${{ inputs.component }}
         run: |
           node bin/hooks-to-doc.mjs \
             --product='${{ inputs.product }}' \
             --input="$GITHUB_WORKSPACE/hooks-json" \
-            ${{ inputs.component && format('--component={0}', inputs.component) || '' }} \
+            ${COMPONENT:+--component="$COMPONENT"} \
             --source-url='${{ github.server_url }}/${{ github.repository }}/blob/${{ github.ref_name }}' \
             --target=production
