@@ -77,9 +77,18 @@ on:
         description: 'PAT with read access to the org''s private submodule repos; only used when submodules is true'
         required: false
 
+# Two jobs. `build` runs on GitHub's runners: it needs the plugin checkout,
+# PHP and composer, and never talks to the site. `publish` runs on the
+# self-hosted runner on Brian's Mac, because SiteGround's anti-bot answers
+# some GitHub-hosted runner IPs with a captcha page (by IP reputation, "ipr:"),
+# and no retry or header gets past it. A personal account has no shared
+# runners, so each calling repo needs its own runner with the label
+# artifex-docs; setup is in the user-docs README, "Self-hosted runner".
 jobs:
-  release-docs:
+  build:
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - name: Checkout plugin
         uses: actions/checkout@v4
@@ -87,13 +96,6 @@ jobs:
           path: plugin
           submodules: ${{ inputs.submodules && 'recursive' || 'false' }}
           token: ${{ secrets.FAMILY_CI_TOKEN || github.token }}
-
-      - name: Checkout user-docs pipeline
-        uses: actions/checkout@v4
-        with:
-          repository: artifexrouting/user-docs
-          token: ${{ secrets.DOCS_REPO_TOKEN }}
-          path: user-docs
 
       - name: Derive version
         id: version
@@ -104,6 +106,51 @@ jobs:
           fi
           echo "version=$v" >> "$GITHUB_OUTPUT"
           echo "Version: $v"
+
+      - uses: shivammathur/setup-php@v2
+        if: ${{ !inputs.skip_hooks }}
+        with:
+          php-version: '8.3'
+          tools: composer
+
+      - name: Generate hooks JSON
+        if: ${{ !inputs.skip_hooks }}
+        run: |
+          mkdir hooks-gen
+          cd hooks-gen
+          composer require erusev/parsedown:1.8.0-beta-7 wp-hooks/generator:^1.0 --no-interaction --quiet
+          vendor/bin/wp-hooks-generator \
+            --input="$GITHUB_WORKSPACE/plugin" \
+            --output="$GITHUB_WORKSPACE/release-docs/hooks-json" \
+            --ignore-files='${{ inputs.hooks_ignore_files }}' \
+            ${{ inputs.hooks_ignore_hooks && format('--ignore-hooks={0}', inputs.hooks_ignore_hooks) || '' }}
+
+      - name: Collect the readme
+        run: |
+          mkdir -p release-docs
+          cp "plugin/${{ inputs.readme_path }}" release-docs/readme.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-docs
+          path: release-docs
+          retention-days: 3
+
+  publish:
+    needs: build
+    runs-on: [self-hosted, artifex-docs]
+    steps:
+      - name: Checkout user-docs pipeline
+        uses: actions/checkout@v4
+        with:
+          repository: artifexrouting/user-docs
+          token: ${{ secrets.DOCS_REPO_TOKEN }}
+          path: user-docs
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-docs
+          path: release-docs
 
       - uses: actions/setup-node@v4
         with:
@@ -126,28 +173,10 @@ jobs:
         run: |
           node bin/release-notes.mjs \
             --product='${{ inputs.product }}' \
-            --version='${{ steps.version.outputs.version }}' \
-            --readme="$GITHUB_WORKSPACE/plugin/${{ inputs.readme_path }}" \
+            --version='${{ needs.build.outputs.version }}' \
+            --readme="$GITHUB_WORKSPACE/release-docs/readme.txt" \
             ${COMPONENT:+--component="$COMPONENT"} \
             --target=production
-
-      - uses: shivammathur/setup-php@v2
-        if: ${{ !inputs.skip_hooks }}
-        with:
-          php-version: '8.3'
-          tools: composer
-
-      - name: Generate hooks JSON
-        if: ${{ !inputs.skip_hooks }}
-        run: |
-          mkdir hooks-gen hooks-json
-          cd hooks-gen
-          composer require erusev/parsedown:1.8.0-beta-7 wp-hooks/generator:^1.0 --no-interaction --quiet
-          vendor/bin/wp-hooks-generator \
-            --input="$GITHUB_WORKSPACE/plugin" \
-            --output="$GITHUB_WORKSPACE/hooks-json" \
-            --ignore-files='${{ inputs.hooks_ignore_files }}' \
-            ${{ inputs.hooks_ignore_hooks && format('--ignore-hooks={0}', inputs.hooks_ignore_hooks) || '' }}
 
       - name: Publish hooks reference
         if: ${{ !inputs.skip_hooks }}
@@ -160,7 +189,7 @@ jobs:
         run: |
           node bin/hooks-to-doc.mjs \
             --product='${{ inputs.product }}' \
-            --input="$GITHUB_WORKSPACE/hooks-json" \
+            --input="$GITHUB_WORKSPACE/release-docs/hooks-json" \
             ${COMPONENT:+--component="$COMPONENT"} \
             --source-url='${{ github.server_url }}/${{ github.repository }}/blob/${{ github.ref_name }}' \
             --target=production
