@@ -116,7 +116,7 @@ jobs:
       - name: Generate hooks JSON
         if: ${{ !inputs.skip_hooks }}
         run: |
-          mkdir hooks-gen
+          mkdir -p hooks-gen release-docs/hooks-json
           cd hooks-gen
           composer require erusev/parsedown:1.8.0-beta-7 wp-hooks/generator:^1.0 --no-interaction --quiet
           vendor/bin/wp-hooks-generator \
